@@ -32,8 +32,10 @@
 #include "TMainGreenlet.cpp"
 #include "TUserGreenlet.cpp"
 #include "TBrokenGreenlet.cpp"
+#if !GREENLET_USE_EXECSTACK
 #include "TExceptionState.cpp"
 #include "TPythonState.cpp"
+#endif
 #include "TStackState.cpp"
 
 #include "TThreadState.hpp"
@@ -57,7 +59,9 @@ using greenlet::UserGreenlet;
 using greenlet::MainGreenlet;
 using greenlet::BrokenGreenlet;
 using greenlet::ThreadState;
+#if !GREENLET_USE_EXECSTACK
 using greenlet::PythonState;
+#endif
 
 
 
@@ -228,6 +232,12 @@ greenlet_internal_mod_init() noexcept
         m.PyAddObject("GREENLET_USE_TRACING", 1);
         m.PyAddObject("GREENLET_USE_CONTEXT_VARS", 1L);
         m.PyAddObject("GREENLET_USE_STANDARD_THREADING", 1L);
+        // Whether the interpreter's PyUnstable_ExecStack API manages the
+        // per-greenlet thread state for us (instead of greenlet poking at
+        // PyThreadState internals). Affects GC behaviour: suspended
+        // greenlets' frames are traversed, so some cycles that used to leak
+        // are now collected.
+        m.PyAddObject("GREENLET_USE_EXECSTACK", (long)GREENLET_USE_EXECSTACK);
 
         NewReference clocks_per_sec(Require(PyLong_FromSsize_t(CLOCKS_PER_SEC)));
         m.PyAddObject("CLOCKS_PER_SEC", clocks_per_sec);

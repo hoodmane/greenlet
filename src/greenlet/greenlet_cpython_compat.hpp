@@ -66,6 +66,19 @@ https://bugs.python.org/issue46090). Summary of breaking internal changes:
 #    define GREENLET_PY315 0
 #endif
 
+/*
+When CPython provides the PyUnstable_ExecStack API, the interpreter does all
+of the thread-state bookkeeping for us: saving and restoring the frame chain,
+the exception stack, the contextvars context, recursion depth and so on, and
+making the frames of a suspended greenlet safe to introspect and traverse.
+The hand-rolled PythonState/ExceptionState code is not compiled in that case.
+*/
+#if defined(Py_HAVE_EXECSTACK) && !defined(GREENLET_NO_EXECSTACK)
+#    define GREENLET_USE_EXECSTACK 1
+#else
+#    define GREENLET_USE_EXECSTACK 0
+#endif
+
 
 /* _Py_DEC_REFTOTAL macro has been removed from Python 3.9 by:
   https://github.com/python/cpython/commit/49932fec62c616ec88da52642339d83ae719e924

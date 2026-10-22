@@ -38,14 +38,26 @@ void UserGreenlet::operator delete(void* ptr)
 UserGreenlet::UserGreenlet(PyGreenlet* p, BorrowedGreenlet the_parent)
     : Greenlet(p), _parent(the_parent)
 {
+#if GREENLET_USE_EXECSTACK
+    // A NEW stack: no frames, empty context. It becomes bound to the
+    // thread on the first switch into it.
+    this->exec_stack = PyUnstable_ExecStack_New(nullptr);
+    if (!this->exec_stack) {
+        throw PyFatalError("greenlet: PyUnstable_ExecStack_New() failed");
+    }
+#endif
 }
 
 UserGreenlet::~UserGreenlet()
 {
+#if !GREENLET_USE_EXECSTACK
     // Python 3.11: If we don't clear out the raw frame datastack
     // when deleting an unfinished greenlet,
     // TestLeaks.test_untracked_memory_doesnt_increase_unfinished_thread_dealloc_in_main fails.
     this->python_state.did_finish(nullptr);
+#endif
+    // With the ExecStack API, the datastack is released together with the
+    // stack in ~Greenlet().
     this->tp_clear();
 }
 
@@ -291,8 +303,13 @@ UserGreenlet::g_initialstub(void* mark)
     ThreadState& thread_state = GET_THREAD_STATE().state();
     this->stack_state = StackState(mark,
                                    thread_state.borrow_current()->stack_state);
+#if !GREENLET_USE_EXECSTACK
     this->python_state.set_initial_state(PyThreadState_GET());
     this->exception_state.clear();
+#endif
+    // With the ExecStack API the fresh state (no frames, empty exception
+    // stack, inherited recursion depth) is set up by the first
+    // PyUnstable_ExecStack_Switch() into our NEW stack.
     this->_main_greenlet = thread_state.get_main_greenlet();
 
     /* perform the initial switch */
@@ -533,7 +550,9 @@ UserGreenlet::inner_bootstrap(PyGreenlet* origin_greenlet, PyObject* run)
         result = single_result(result);
     }
     this->release_args();
+#if !GREENLET_USE_EXECSTACK
     this->python_state.did_finish(PyThreadState_GET());
+#endif
 
     result = g_handle_exit(result);
     assert(this->thread_state()->borrow_current() == this->_self);

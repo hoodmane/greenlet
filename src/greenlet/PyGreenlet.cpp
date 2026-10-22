@@ -46,7 +46,9 @@ using greenlet::UserGreenlet;
 using greenlet::MainGreenlet;
 using greenlet::BrokenGreenlet;
 using greenlet::ThreadState;
+#if !GREENLET_USE_EXECSTACK
 using greenlet::PythonState;
+#endif
 using greenlet::refs::PyCriticalObjectSection;
 
 
@@ -665,8 +667,15 @@ static PyObject*
 green_getframe(PyGreenlet* self, void* UNUSED(context))
 {
     PyCriticalObjectSection cs(self);
+#if GREENLET_USE_EXECSTACK
+    // A new reference, or None. For a running greenlet this is the thread's
+    // current frame; for a suspended one the interpreter hands us a frame
+    // whose f_back chain is safe to walk.
+    return BorrowedGreenlet(self)->top_frame().relinquish_ownership();
+#else
     const PythonState::OwnedFrame& top_frame = BorrowedGreenlet(self)->top_frame();
     return top_frame.acquire_or_None();
+#endif
 }
 
 
@@ -808,8 +817,12 @@ PyTypeObject PyGreenlet_Type = {
     .tp_alloc=PyType_GenericAlloc,                  /* tp_alloc */
     .tp_new=(newfunc)green_new,                          /* tp_new */
     .tp_free=PyObject_GC_Del,                   /* tp_free */
-#if !GREENLET_PY315 && !(GREENLET_PY314 && defined(Py_GIL_DISABLED))
+#if !GREENLET_PY315 && !(GREENLET_PY314 && defined(Py_GIL_DISABLED)) && !GREENLET_USE_EXECSTACK
 /*
+  With the PyUnstable_ExecStack API, the interpreter traverses the frames of
+  suspended greenlets for us (PyUnstable_ExecStack_Traverse), so active
+  greenlets can safely be garbage collectable, as on 3.15.
+
   We may have been handling this wrong all along.
 
   It shows as a problem with the GIL disabled. In builds of 3.14 with

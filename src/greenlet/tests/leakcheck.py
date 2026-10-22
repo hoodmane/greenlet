@@ -113,8 +113,13 @@ def fails_leakcheck(func):
 def fails_leakcheck_on_py314_or_less(func):
     """
     Mark the function as known to leak (fails refcount leakchecks) on Python 3.14 or less.
+
+    When the interpreter provides the PyUnstable_ExecStack API, the frames
+    of suspended greenlets are traversed by the GC on any version, and
+    these leaks are fixed there too.
     """
-    if sys.version_info[:2] <= (3, 14):
+    from greenlet._greenlet import GREENLET_USE_EXECSTACK
+    if sys.version_info[:2] <= (3, 14) and not GREENLET_USE_EXECSTACK:
         return fails_leakcheck(func)
     return func
 

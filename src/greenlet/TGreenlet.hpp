@@ -26,6 +26,9 @@ using greenlet::refs::BorrowedGreenlet;
 #  define _PyInterpreterFrame _interpreter_frame
 #endif
 
+#if !GREENLET_USE_EXECSTACK
+// Without the PyUnstable_ExecStack API we have to reach into interpreter
+// internals to save and restore the thread state ourselves.
 #if GREENLET_PY312
 #  define Py_BUILD_CORE
 #  include "internal/pycore_frame.h"
@@ -51,12 +54,14 @@ using greenlet::refs::BorrowedGreenlet;
 #include "internal/pycore_stackref.h"
 #endif
 #endif
+#endif // !GREENLET_USE_EXECSTACK
 
 // XXX: TODO: Work to remove all virtual functions
 // for speed of calling and size of objects (no vtable).
 // One pattern is the Curiously Recurring Template
 namespace greenlet
 {
+#if !GREENLET_USE_EXECSTACK
     class ExceptionState
     {
     private:
@@ -208,6 +213,7 @@ namespace greenlet
         inline void will_switch_from(PyThreadState *const origin_tstate) noexcept;
         void did_finish(PyThreadState* tstate) noexcept;
     };
+#endif // !GREENLET_USE_EXECSTACK
 
     class StackState
     {
@@ -378,10 +384,20 @@ namespace greenlet
         friend class UserGreenlet;
         friend class MainGreenlet;
     protected:
+#if GREENLET_USE_EXECSTACK
+        // The interpreter-managed per-greenlet thread state. User greenlets
+        // own a NEW stack from PyUnstable_ExecStack_New(); the main greenlet
+        // holds a reference to the thread's root stack. Either way we hold
+        // one reference and release it in the destructor.
+        PyUnstable_ExecStack* exec_stack;
+#else
         ExceptionState exception_state;
+#endif
         SwitchingArgs switch_args;
         StackState stack_state;
+#if !GREENLET_USE_EXECSTACK
         PythonState python_state;
+#endif
         Greenlet(PyGreenlet* p, const StackState& initial_state);
     public:
         // This constructor takes ownership of the PyGreenlet, by
@@ -400,7 +416,12 @@ namespace greenlet
         // PythonState::may_switch_away().
         inline void may_switch_away()
         {
+#if !GREENLET_USE_EXECSTACK
             this->python_state.may_switch_away();
+#endif
+            // With the ExecStack API the frame object of a suspended
+            // greenlet is created lazily and safely by the interpreter, so
+            // there is nothing to prepare.
         }
 
         inline void context(refs::BorrowedObject new_context);
@@ -479,6 +500,12 @@ namespace greenlet
         // introspection purposes.
         void expose_frames();
 
+#if GREENLET_USE_EXECSTACK
+        // Release everything our execution stack owns (if it isn't
+        // running). Used by tp_clear() and deactivate_and_free().
+        void clear_exec_stack();
+#endif
+
 
         // TODO: Figure out how to make these non-public.
         inline void slp_restore_state() noexcept;
@@ -504,10 +531,29 @@ namespace greenlet
         virtual const OwnedGreenlet parent() const = 0;
         virtual void parent(const refs::BorrowedObject new_parent) = 0;
 
+#if GREENLET_USE_EXECSTACK
+        // New reference to the topmost frame of a suspended greenlet, or
+        // None. Safe to call at any time.
+        inline OwnedObject top_frame()
+        {
+            // gr_frame is documented to be None for a running greenlet.
+            PyFrameObject* frame =
+                (this->exec_stack
+                 && PyUnstable_ExecStack_GetState(this->exec_stack)
+                    != PyUnstable_ExecStack_RUNNING)
+                ? PyUnstable_ExecStack_GetFrame(this->exec_stack)
+                : nullptr;
+            if (!frame) {
+                return OwnedObject::None();
+            }
+            return OwnedObject::consuming(reinterpret_cast<PyObject*>(frame));
+        }
+#else
         inline const PythonState::OwnedFrame& top_frame()
         {
             return this->python_state.top_frame();
         }
+#endif
 
         virtual const OwnedObject& run() const = 0;
         virtual void run(const refs::BorrowedObject nrun) = 0;

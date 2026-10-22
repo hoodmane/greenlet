@@ -26,7 +26,11 @@ Greenlet::Greenlet(PyGreenlet* p)
 }
 
 Greenlet::Greenlet(PyGreenlet* p, const StackState& initial_stack)
-    :  _self(p), stack_state(initial_stack)
+    :  _self(p),
+#if GREENLET_USE_EXECSTACK
+       exec_stack(nullptr),
+#endif
+       stack_state(initial_stack)
 {
     assert(p->pimpl == nullptr);
     p->pimpl = this;
@@ -38,6 +42,18 @@ Greenlet::~Greenlet()
     // time we're here, we've sliced off our child classes.
     //this->tp_clear();
     this->_self->pimpl = nullptr;
+#if GREENLET_USE_EXECSTACK
+    if (this->exec_stack) {
+        // Subclasses have already run tp_clear(), so this just drops our
+        // reference. For a user greenlet that is the last one and the
+        // interpreter frees the stack (and its datastack chunks); for the
+        // main greenlet the thread state may still hold its own.
+        if (PyUnstable_ExecStack_Free(this->exec_stack) < 0) {
+            PyErr_WriteUnraisable(nullptr);
+        }
+        this->exec_stack = nullptr;
+    }
+#endif
 }
 
 bool
@@ -131,8 +147,23 @@ Greenlet::g_switchstack_success() noexcept
 {
     PyThreadState* tstate = PyThreadState_GET();
     // restore the saved state
+#if GREENLET_USE_EXECSTACK
+    // We are now running on this greenlet's C stack, so the interpreter
+    // can safely re-link the entry frames of our frame chain. The greenlet
+    // we came from suspended its stack in g_switchstack() before the C
+    // stack switch.
+    if (PyUnstable_ExecStack_Resume(tstate, this->exec_stack) < 0) {
+        // The only failures are programming errors (resuming a stack that
+        // is already running or belongs to another thread). We have already
+        // switched C stacks, so there is no way to back out.
+        PyErr_WriteUnraisable(nullptr);
+        Py_FatalError("greenlet: PyUnstable_ExecStack_Resume() failed after "
+                      "the C stack switch; cannot continue.");
+    }
+#else
     this->python_state >> tstate;
     this->exception_state >> tstate;
+#endif
 
     // The thread state hasn't been changed yet.
     ThreadState* thread_state = this->thread_state();
@@ -162,6 +193,21 @@ Greenlet::g_switchstack(void)
             return switchstack_result_t(0,
                                         this, this->thread_state()->borrow_current());
         }
+#if GREENLET_USE_EXECSTACK
+        // Save the current greenlet's state while its C stack is still
+        // intact: the interpreter needs to read the entry frames it keeps
+        // there. slp_switch() is about to overwrite that stack with the
+        // target's, and g_switchstack_success() resumes the target's stack
+        // once it is in place.
+        PyThreadState* tstate = PyThreadState_GET();
+        if (!PyUnstable_ExecStack_Suspend(tstate)) {
+            // Out of memory for the entry-frame table. Nothing has been
+            // changed, so we can report it like any other failure to
+            // switch.
+            return switchstack_result_t(-1);
+        }
+        switching_thread_state = this;
+#else
         BorrowedGreenlet current = this->thread_state()->borrow_current();
         PyThreadState* tstate = PyThreadState_GET();
 
@@ -170,6 +216,7 @@ Greenlet::g_switchstack(void)
         this->python_state.will_switch_from(tstate);
         switching_thread_state = this;
         current->expose_frames();
+#endif
     }
     assert(this->args() || PyErr_Occurred());
     // If this is the first switch into a greenlet, this will
@@ -281,25 +328,33 @@ Greenlet::check_switch_allowed() const
 const OwnedObject
 Greenlet::context() const
 {
-    using greenlet::PythonStateContext;
     OwnedObject result;
 
     if (this->is_currently_running_in_some_thread()) {
         /* Currently running greenlet: context is stored in the thread state,
            not the greenlet object. */
-        if (GET_THREAD_STATE().state().is_current(this->self())) {
-            result = PythonStateContext::context(PyThreadState_GET());
-        }
-        else {
+        if (!GET_THREAD_STATE().state().is_current(this->self())) {
             throw ValueError(
                             "cannot get context of a "
                             "greenlet that is running in a different thread");
         }
+#if !GREENLET_USE_EXECSTACK
+        result = PythonStateContext::context(PyThreadState_GET());
+#endif
     }
+#if GREENLET_USE_EXECSTACK
+    // GetContext() reads the thread state for the running stack and the
+    // saved value otherwise.
+    if (this->exec_stack) {
+        result = OwnedObject::consuming(
+            PyUnstable_ExecStack_GetContext(this->exec_stack));
+    }
+#else
     else {
         /* Greenlet is not running: just return context. */
         result = this->python_state.context();
     }
+#endif
     if (!result) {
         result = OwnedObject::None();
     }
@@ -310,7 +365,9 @@ Greenlet::context() const
 void
 Greenlet::context(BorrowedObject given)
 {
+#if !GREENLET_USE_EXECSTACK
     using greenlet::PythonStateContext;
+#endif
     if (!given) {
         throw AttributeError("can't delete context attribute");
     }
@@ -328,17 +385,30 @@ Greenlet::context(BorrowedObject given)
             throw ValueError("cannot set context of a greenlet"
                              " that is running in a different thread");
         }
-
+#if !GREENLET_USE_EXECSTACK
         /* Currently running greenlet: context is stored in the thread state,
            not the greenlet object. */
         OwnedObject octx = OwnedObject::consuming(PythonStateContext::context(tstate));
         PythonStateContext::context(tstate, context.relinquish_ownership());
+#endif
     }
+#if GREENLET_USE_EXECSTACK
+    (void)tstate;
+    if (!this->exec_stack) {
+        // Main greenlet of a dead thread whose stack has been released.
+        throw ValueError("cannot set context of a greenlet "
+                         "whose thread has exited");
+    }
+    if (PyUnstable_ExecStack_SetContext(this->exec_stack, context.borrow()) < 0) {
+        throw PyErrOccurred();
+    }
+#else
     else {
         /* Greenlet is not running: just set context. Note that the
            greenlet may be dead.*/
         this->python_state.context() = context;
     }
+#endif
 }
 
 /**
@@ -528,7 +598,11 @@ Greenlet::deactivate_and_free()
     // running and the thread state doesn't have
     // this frame.)
     // So here, we *do* clear it.
+#if GREENLET_USE_EXECSTACK
+    this->clear_exec_stack();
+#else
     this->python_state.tp_clear(true);
+#endif
 }
 
 bool
@@ -581,10 +655,42 @@ Greenlet::deallocing_greenlet_in_thread(const ThreadState* current_thread_state)
 }
 
 
+#if GREENLET_USE_EXECSTACK
+void
+Greenlet::clear_exec_stack()
+{
+    if (!this->exec_stack) {
+        return;
+    }
+    if (PyUnstable_ExecStack_GetState(this->exec_stack)
+        == PyUnstable_ExecStack_RUNNING) {
+        // Can't happen for a user greenlet: the thread state's current
+        // greenlet keeps it alive. The main greenlet of a live thread is
+        // cleared only by its destructor, which only runs after the
+        // thread's registry entry released it.
+        return;
+    }
+    // Releases the context, the exception stack, and clears any frames the
+    // greenlet was suspended in (running their finalizers), the way a
+    // generator's tp_clear does.
+    if (PyUnstable_ExecStack_Clear(this->exec_stack) < 0) {
+        PyErr_WriteUnraisable(nullptr);
+    }
+}
+#endif
+
 int
 Greenlet::tp_traverse(visitproc visit, void* arg)
 {
-
+#if GREENLET_USE_EXECSTACK
+    // The interpreter visits the context, the handled exception, and --
+    // when suspended -- every frame and its evaluation stack. While we are
+    // running, our state lives in the thread state and is visited there.
+    if (this->exec_stack) {
+        return PyUnstable_ExecStack_Traverse(this->exec_stack, visit, arg);
+    }
+    return 0;
+#else
     int result;
     if ((result = this->exception_state.tp_traverse(visit, arg)) != 0) {
         return result;
@@ -599,14 +705,35 @@ Greenlet::tp_traverse(visitproc visit, void* arg)
         return result;
     }
     return 0;
+#endif
 }
 
 int
 Greenlet::tp_clear()
 {
     bool own_top_frame = this->was_running_in_dead_thread();
+#if GREENLET_USE_EXECSTACK
+    if (own_top_frame || !this->active()) {
+        // Dead thread, never started, or finished: nothing will ever run
+        // on this stack again, release everything (clearing any frames
+        // left over from a dead thread).
+        this->clear_exec_stack();
+    }
+    else if (this->exec_stack
+             && PyUnstable_ExecStack_GetState(this->exec_stack)
+                != PyUnstable_ExecStack_RUNNING) {
+        // Suspended in a live thread. The GC found us in a cycle; when we
+        // are deallocated, GreenletExit is thrown into us and our frames
+        // unwind normally, running their finally blocks. So only break
+        // the cycle through the context here and leave the frames alone.
+        if (PyUnstable_ExecStack_SetContext(this->exec_stack, nullptr) < 0) {
+            PyErr_WriteUnraisable(nullptr);
+        }
+    }
+#else
     this->exception_state.tp_clear();
     this->python_state.tp_clear(own_top_frame);
+#endif
     if (own_top_frame) {
         // Throw away any saved stack state since the owned frame is cleared.
         this->stack_state.set_inactive();
@@ -616,10 +743,15 @@ Greenlet::tp_clear()
 
 bool Greenlet::is_currently_running_in_some_thread() const
 {
+#if GREENLET_USE_EXECSTACK
+    return this->exec_stack
+        && PyUnstable_ExecStack_GetState(this->exec_stack) == PyUnstable_ExecStack_RUNNING;
+#else
     return this->stack_state.active() && !this->python_state.top_frame();
+#endif
 }
 
-#if GREENLET_PY312
+#if GREENLET_PY312 && !GREENLET_USE_EXECSTACK
 void GREENLET_NOINLINE(Greenlet::expose_frames)()
 {
     if (!this->python_state.top_frame()) {

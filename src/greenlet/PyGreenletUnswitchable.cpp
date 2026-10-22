@@ -39,7 +39,9 @@ using greenlet::UserGreenlet;
 using greenlet::MainGreenlet;
 using greenlet::BrokenGreenlet;
 using greenlet::ThreadState;
+#if !GREENLET_USE_EXECSTACK
 using greenlet::PythonState;
+#endif
 
 
 #include "PyGreenlet.hpp"

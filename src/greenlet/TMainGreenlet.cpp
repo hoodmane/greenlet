@@ -49,6 +49,16 @@ MainGreenlet::MainGreenlet(PyGreenlet* p, ThreadState* state)
       _thread_state(state)
 {
     G_TOTAL_MAIN_GREENLETS++;
+#if GREENLET_USE_EXECSTACK
+    // The main greenlet is the thread's original execution stack. We take
+    // our own reference so that the stack object stays valid if we outlive
+    // the thread (other threads' greenlets can keep us alive); once the
+    // thread exits it becomes a detached, empty stack.
+    this->exec_stack = PyUnstable_ThreadState_GetExecStack(PyThreadState_GET());
+    if (!this->exec_stack) {
+        throw PyFatalError("greenlet: PyUnstable_ThreadState_GetExecStack() failed");
+    }
+#endif
 }
 
 MainGreenlet::~MainGreenlet()
