@@ -148,18 +148,9 @@ Greenlet::g_switchstack_success() noexcept
     PyThreadState* tstate = PyThreadState_GET();
     // restore the saved state
 #if GREENLET_USE_EXECSTACK
-    // We are now running on this greenlet's C stack, so the interpreter
-    // can safely re-link the entry frames of our frame chain. The greenlet
-    // we came from suspended its stack in g_switchstack() before the C
-    // stack switch.
-    if (PyUnstable_ExecStack_Resume(tstate, this->exec_stack) < 0) {
-        // The only failures are programming errors (resuming a stack that
-        // is already running or belongs to another thread). We have already
-        // switched C stacks, so there is no way to back out.
-        PyErr_WriteUnraisable(nullptr);
-        Py_FatalError("greenlet: PyUnstable_ExecStack_Resume() failed after "
-                      "the C stack switch; cannot continue.");
-    }
+    // Nothing to do: g_switchstack() switched the Python side, from the
+    // origin's stack to ours, before the C stack switch.
+    assert(PyUnstable_ExecStack_IsRunning(this->exec_stack));
 #else
     this->python_state >> tstate;
     this->exception_state >> tstate;
@@ -194,17 +185,19 @@ Greenlet::g_switchstack(void)
                                         this, this->thread_state()->borrow_current());
         }
 #if GREENLET_USE_EXECSTACK
-        // Save the current greenlet's state while its C stack is still
+        // Switch the Python side now, while the current C stack is still
         // intact: the interpreter needs to read the entry frames it keeps
-        // there. slp_switch() is about to overwrite that stack with the
-        // target's, and g_switchstack_success() resumes the target's stack
-        // once it is in place.
+        // there. Loading the target's state only writes to the thread state
+        // and to heap frames, so it does not matter that the target's C
+        // stack has not been restored yet. slp_switch() does that next; no
+        // Python code runs in between.
         PyThreadState* tstate = PyThreadState_GET();
         BorrowedGreenlet current = this->thread_state()->borrow_current();
-        if (PyUnstable_ExecStack_Suspend(tstate, current->exec_stack) < 0) {
-            // Out of memory for the entry-frame table. Nothing has been
-            // changed, so we can report it like any other failure to
-            // switch.
+        if (PyUnstable_ExecStack_Switch(tstate, current->exec_stack,
+                                        this->exec_stack) < 0) {
+            // Out of memory for the entry-frame table, or a programming
+            // error. Nothing has been changed, so we can report it like any
+            // other failure to switch.
             return switchstack_result_t(-1);
         }
         switching_thread_state = this;
