@@ -44,13 +44,13 @@ Greenlet::~Greenlet()
     this->_self->pimpl = nullptr;
 #if GREENLET_USE_EXECSTACK
     if (this->exec_stack) {
-        // Subclasses have already run tp_clear(), so this just drops our
-        // reference. For a user greenlet that is the last one and the
-        // interpreter frees the stack (and its datastack chunks); for the
-        // main greenlet the thread state may still hold its own.
-        if (PyUnstable_ExecStack_Free(this->exec_stack) < 0) {
-            PyErr_WriteUnraisable(nullptr);
-        }
+        // Subclasses have already run tp_clear(). This releases anything
+        // still owned by the stack (the datastack chunks of an unfinished
+        // greenlet, for instance) and the stack object itself. A main
+        // greenlet's stack is RUNNING if its thread is alive -- the thread
+        // registry entry keeps the main greenlet alive until the thread
+        // exits, so by now the thread is gone and the stack owns nothing.
+        PyUnstable_ExecStack_Free(this->exec_stack);
         this->exec_stack = nullptr;
     }
 #endif
@@ -200,7 +200,8 @@ Greenlet::g_switchstack(void)
         // target's, and g_switchstack_success() resumes the target's stack
         // once it is in place.
         PyThreadState* tstate = PyThreadState_GET();
-        if (!PyUnstable_ExecStack_Suspend(tstate)) {
+        BorrowedGreenlet current = this->thread_state()->borrow_current();
+        if (PyUnstable_ExecStack_Suspend(tstate, current->exec_stack) < 0) {
             // Out of memory for the entry-frame table. Nothing has been
             // changed, so we can report it like any other failure to
             // switch.
