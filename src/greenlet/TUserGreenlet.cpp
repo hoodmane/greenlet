@@ -41,7 +41,7 @@ UserGreenlet::UserGreenlet(PyGreenlet* p, BorrowedGreenlet the_parent)
 #if GREENLET_USE_EXECSTACK
     // A NEW stack: no frames, empty context. It becomes bound to the
     // thread on the first switch into it.
-    this->exec_stack = PyUnstable_ExecStack_New(nullptr);
+    this->exec_stack = PyUnstable_ExecStack_New();
     if (!this->exec_stack) {
         throw PyFatalError("greenlet: PyUnstable_ExecStack_New() failed");
     }
