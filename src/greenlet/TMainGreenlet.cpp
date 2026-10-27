@@ -50,21 +50,12 @@ MainGreenlet::MainGreenlet(PyGreenlet* p, ThreadState* state)
 {
     G_TOTAL_MAIN_GREENLETS++;
 #if GREENLET_USE_EXECSTACK
-    // The main greenlet stands for the thread's original execution stack.
-    // The interpreter does not track that itself: we create a NEW stack
-    // object and it adopts the thread's live state the first time we
-    // switch away from the main greenlet (PyUnstable_ExecStack_Suspend).
-    this->exec_stack = PyUnstable_ExecStack_New(nullptr);
+    // The main greenlet stands for the thread's original execution stack,
+    // which is running right now. The interpreter does not track that
+    // itself; Adopt() gives us a RUNNING stack object for it.
+    this->exec_stack = PyUnstable_ExecStack_Adopt(PyThreadState_GET());
     if (!this->exec_stack) {
-        throw PyFatalError("greenlet: PyUnstable_ExecStack_New() failed");
-    }
-    // Adopt right away rather than waiting for the first switch, so that
-    // the stack is RUNNING whenever the main greenlet is current: context()
-    // and is_currently_running_in_some_thread() rely on that.
-    PyThreadState* tstate = PyThreadState_GET();
-    if (PyUnstable_ExecStack_Suspend(tstate, this->exec_stack) < 0
-        || PyUnstable_ExecStack_Resume(tstate, this->exec_stack) < 0) {
-        throw PyFatalError("greenlet: could not adopt the thread's execution stack");
+        throw PyFatalError("greenlet: PyUnstable_ExecStack_Adopt() failed");
     }
 #endif
 }
