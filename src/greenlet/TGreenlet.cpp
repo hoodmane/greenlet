@@ -663,8 +663,7 @@ Greenlet::clear_exec_stack()
     if (!this->exec_stack) {
         return;
     }
-    if (PyUnstable_ExecStack_GetState(this->exec_stack)
-        == PyUnstable_ExecStack_RUNNING) {
+    if (PyUnstable_ExecStack_IsRunning(this->exec_stack)) {
         // Can't happen for a user greenlet: the thread state's current
         // greenlet keeps it alive. The main greenlet of a live thread is
         // cleared only by its destructor, which only runs after the
@@ -721,8 +720,7 @@ Greenlet::tp_clear()
         this->clear_exec_stack();
     }
     else if (this->exec_stack
-             && PyUnstable_ExecStack_GetState(this->exec_stack)
-                != PyUnstable_ExecStack_RUNNING) {
+             && !PyUnstable_ExecStack_IsRunning(this->exec_stack)) {
         // Suspended in a live thread. The GC found us in a cycle; when we
         // are deallocated, GreenletExit is thrown into us and our frames
         // unwind normally, running their finally blocks. So only break
@@ -746,7 +744,7 @@ bool Greenlet::is_currently_running_in_some_thread() const
 {
 #if GREENLET_USE_EXECSTACK
     return this->exec_stack
-        && PyUnstable_ExecStack_GetState(this->exec_stack) == PyUnstable_ExecStack_RUNNING;
+        && PyUnstable_ExecStack_IsRunning(this->exec_stack);
 #else
     return this->stack_state.active() && !this->python_state.top_frame();
 #endif

@@ -539,8 +539,7 @@ namespace greenlet
             // gr_frame is documented to be None for a running greenlet.
             PyFrameObject* frame =
                 (this->exec_stack
-                 && PyUnstable_ExecStack_GetState(this->exec_stack)
-                    != PyUnstable_ExecStack_RUNNING)
+                 && !PyUnstable_ExecStack_IsRunning(this->exec_stack))
                 ? PyUnstable_ExecStack_GetFrame(this->exec_stack)
                 : nullptr;
             if (!frame) {
